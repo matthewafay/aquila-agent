@@ -1,22 +1,22 @@
-# LMCC — Local Mode: Command & Conquer AI Agent Harness
+# Aquila Agent — Local AI Coding Agent for LM Studio
 
-A terminal AI agent harness that talks to a local **LM Studio** server. Acts like a stripped-down Claude Code — same kind of file / shell / web tool loop, but powered by whatever model you have loaded locally. The CLI ships as `lmcc`.
+A terminal AI agent harness that talks to a local **LM Studio** server. Acts like a stripped-down Claude Code — same kind of file / shell / web tool loop, but powered by whatever model you have loaded locally. The CLI ships as `aquila`.
 
 ### At a glance
 
 - **14 callable tools** across file editing, shell (foreground + background), search/grep, web, and task tracking
 - **Plan mode** — read-only investigation, then `/approve` to execute
 - **Streaming UI** — live token counter, elapsed timer, Markdown rendering of model output, syntax-highlighted diffs for edits, JSON panels for tool calls
-- **Background processes** — the model can launch dev servers / watchers; they get logged to `.lmcc/bg_*.log` and survive across agent turns, with `/processes` and `/stop <pid>` to manage them
+- **Background processes** — the model can launch dev servers / watchers; they get logged to `.aquila/bg_*.log` and survive across agent turns, with `/processes` and `/stop <pid>` to manage them
 - **Structured todos** — the model maintains a checklist for multi-step work, rendered as a live panel
 - **Hot model switching** — `/model <substring>` swaps to any other model currently loaded in LM Studio mid-conversation
 - **Cross-platform shell** — PowerShell on Windows, bash on Unix; same tool name either way
-- **Persistent REPL history** — your previous prompts are in `~/.lmcc_history`, with slash-command tab completion
+- **Persistent REPL history** — your previous prompts are in `~/.aquila_history`, with slash-command tab completion
 - **OpenAI-compatible** — uses the official `openai` SDK pointed at LM Studio, so the agent loop also works against any other OpenAI-compatible local server (Ollama's OpenAI shim, llama.cpp server, vLLM, etc.) with `--base-url`
 
 ## Prerequisites — set up LM Studio first
 
-**LMCC does nothing on its own.** It is a client; the actual model lives in LM Studio. You must have LM Studio installed, running in **server mode**, and with a tool-calling model loaded **before** you start `lmcc`. If any of those three things isn't true, `lmcc` will exit with an error on launch.
+**Aquila does nothing on its own.** It is a client; the actual model lives in LM Studio. You must have LM Studio installed, running in **server mode**, and with a tool-calling model loaded **before** you start `aquila`. If any of those three things isn't true, `aquila` will exit with an error on launch.
 
 1. **Install LM Studio.** Download from [lmstudio.ai](https://lmstudio.ai/) (Windows / macOS / Linux builds). Install and launch it.
 2. **Download a tool-calling-capable model.** Open the **Discover** (search) tab inside LM Studio and pull one of:
@@ -33,9 +33,9 @@ A terminal AI agent harness that talks to a local **LM Studio** server. Acts lik
    ```powershell
    curl http://localhost:1234/v1/models
    ```
-   You should get back JSON listing the loaded model(s). If this fails, `lmcc` will fail too.
+   You should get back JSON listing the loaded model(s). If this fails, `aquila` will fail too.
 
-Only after all five steps should you run `lmcc`. The CLI's first action is to call `/v1/models` against LM Studio; if the server is down or no model is loaded, it prints a hint and exits with code 2.
+Only after all five steps should you run `aquila`. The CLI's first action is to call `/v1/models` against LM Studio; if the server is down or no model is loaded, it prints a hint and exits with code 2.
 
 ### Other requirements
 
@@ -47,15 +47,15 @@ Only after all five steps should you run `lmcc`. The CLI's first action is to ca
 Clone and install in editable mode:
 
 ```powershell
-git clone https://github.com/<you>/LMStudioCC.git
-cd LMStudioCC
+git clone https://github.com/<you>/aquila-agent.git
+cd aquila-agent
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1     # Windows
 # source .venv/bin/activate      # macOS / Linux
 pip install -e .
 ```
 
-This installs the `lmcc` console script and pulls in the dependencies declared in [pyproject.toml](pyproject.toml):
+This installs the `aquila` console script and pulls in the dependencies declared in [pyproject.toml](pyproject.toml):
 
 - `openai>=1.40` — OpenAI Python SDK, pointed at the LM Studio server
 - `rich>=13.7` — terminal rendering (panels, syntax highlighting, live streaming)
@@ -68,7 +68,7 @@ If you'd rather not install the script entry point:
 
 ```powershell
 pip install openai rich prompt_toolkit duckduckgo-search httpx beautifulsoup4
-python -m lmcc
+python -m aquila
 ```
 
 ## Quick start
@@ -78,7 +78,7 @@ python -m lmcc
 3. From the terminal:
 
 ```powershell
-lmcc
+aquila
 ```
 
 You should see a banner showing the model and the working directory, then a `»` prompt.
@@ -87,28 +87,28 @@ You should see a banner showing the model and the working directory, then a `»`
 
 ```powershell
 # Interactive REPL — uses the first loaded model
-lmcc
+aquila
 
 # Pick a specific model (substring match works, e.g. "qwen" → "qwen2.5-coder-7b-instruct")
-lmcc --model qwen
+aquila --model qwen
 
 # One-shot prompt, then exit
-lmcc "list the python files under src and summarize each"
+aquila "list the python files under src and summarize each"
 
 # Point at a remote LM Studio (another machine on the network)
-lmcc --base-url http://192.168.1.50:1234/v1
+aquila --base-url http://192.168.1.50:1234/v1
 
 # Different working directory for file/shell tools
-lmcc --cwd C:\Code\some-project
+aquila --cwd C:\Code\some-project
 
 # Tuning
-lmcc --temperature 0.4 --max-iters 40
+aquila --temperature 0.4 --max-iters 40
 ```
 
 Environment overrides (so you don't have to pass flags every time):
 
-- `LMCC_BASE_URL` — default base URL (e.g. `http://localhost:1234/v1`)
-- `LMCC_API_KEY` — default API key (LM Studio accepts anything; defaults to `lm-studio`)
+- `AQUILA_BASE_URL` — default base URL (e.g. `http://localhost:1234/v1`)
+- `AQUILA_API_KEY` — default API key (LM Studio accepts anything; defaults to `lm-studio`)
 
 ## REPL commands
 
@@ -136,22 +136,22 @@ Anything not starting with `/` is sent to the model.
 
 ## Tools the model can call
 
-| tool                   | purpose                                                               |
-| ---------------------- | --------------------------------------------------------------------- |
-| `read_file`            | UTF-8 file read (up to 400 KB)                                        |
-| `write_file`           | create / overwrite a file (auto-creates parent dirs)                  |
-| `edit_file`            | replace one unique substring in a file                                |
-| `multi_edit`           | apply many (old → new) replacements to one file atomically            |
-| `list_dir`             | non-recursive directory listing                                       |
-| `search_files`         | recursive glob, e.g. `**/*.py`                                        |
-| `grep`                 | recursive regex search across text files                              |
-| `run_shell`            | foreground PowerShell / bash command (120 s timeout)                  |
-| `run_shell_background` | spawn a long-running process (dev servers, watchers); logs to `.lmcc/`|
-| `list_processes`       | list background processes the agent started                           |
-| `stop_process`         | terminate one of those background processes by PID                    |
-| `web_search`           | DuckDuckGo search                                                     |
-| `web_fetch`            | GET a URL, return readable text (HTML stripped)                       |
-| `todo_write`           | maintain a structured task list for the current request               |
+| tool                   | purpose                                                                |
+| ---------------------- | ---------------------------------------------------------------------- |
+| `read_file`            | UTF-8 file read (up to 400 KB)                                         |
+| `write_file`           | create / overwrite a file (auto-creates parent dirs)                   |
+| `edit_file`            | replace one unique substring in a file                                 |
+| `multi_edit`           | apply many (old → new) replacements to one file atomically             |
+| `list_dir`             | non-recursive directory listing                                        |
+| `search_files`         | recursive glob, e.g. `**/*.py`                                         |
+| `grep`                 | recursive regex search across text files                               |
+| `run_shell`            | foreground PowerShell / bash command (120 s timeout)                   |
+| `run_shell_background` | spawn a long-running process (dev servers, watchers); logs to `.aquila/`|
+| `list_processes`       | list background processes the agent started                            |
+| `stop_process`         | terminate one of those background processes by PID                     |
+| `web_search`           | DuckDuckGo search                                                      |
+| `web_fetch`            | GET a URL, return readable text (HTML stripped)                        |
+| `todo_write`           | maintain a structured task list for the current request                |
 
 All relative paths resolve against the current `/cwd`.
 
@@ -173,14 +173,14 @@ All relative paths resolve against the current `/cwd`.
 **Shell tools**
 
 - `run_shell(command)` — foreground. 120 s timeout. Returns `STDOUT` / `STDERR` / `EXIT` sections. Output truncated to ~16 KB. PowerShell flags used: `-NoProfile -NonInteractive -Command`; bash uses `bash -lc`.
-- `run_shell_background(command)` — spawns detached, returns immediately with the PID. Logs combined stdout/stderr to `<cwd>/.lmcc/bg_<hash>.log`. On Windows it uses `CREATE_NEW_PROCESS_GROUP` so the child survives independently of the agent's console.
+- `run_shell_background(command)` — spawns detached, returns immediately with the PID. Logs combined stdout/stderr to `<cwd>/.aquila/bg_<hash>.log`. On Windows it uses `CREATE_NEW_PROCESS_GROUP` so the child survives independently of the agent's console.
 - `list_processes()` — shows every background PID with `running` or `exited(<code>)` status. Dead PIDs are reaped after listing.
 - `stop_process(pid)` — sends `terminate()`, then `kill()` after a 5 s grace period.
 
 **Web tools**
 
 - `web_search(query, max_results=5)` — DuckDuckGo via the `duckduckgo-search` library. Returns title / URL / snippet for each hit.
-- `web_fetch(url)` — `httpx` GET with 30 s timeout, follows redirects, sends `User-Agent: lmcc/0.1`. HTML responses go through BeautifulSoup, get stripped of `<script>` / `<style>` / `<noscript>`, and are flattened to text. Non-HTML responses are returned as-is. Output truncated to ~16 KB.
+- `web_fetch(url)` — `httpx` GET with 30 s timeout, follows redirects, sends `User-Agent: aquila/0.1`. HTML responses go through BeautifulSoup, get stripped of `<script>` / `<style>` / `<noscript>`, and are flattened to text. Non-HTML responses are returned as-is. Output truncated to ~16 KB.
 
 **Task tracking**
 
@@ -191,7 +191,7 @@ All relative paths resolve against the current `/cwd`.
 When the model needs to start something that doesn't exit on its own (`npm run dev`, `vite`, `python -m http.server`, etc.) it uses `run_shell_background` instead of `run_shell`. That:
 
 1. spawns the process detached from the agent,
-2. writes its combined stdout/stderr to `<cwd>/.lmcc/bg_<hash>.log`,
+2. writes its combined stdout/stderr to `<cwd>/.aquila/bg_<hash>.log`,
 3. returns the PID immediately so the agent can keep working.
 
 You can inspect them yourself with `/processes` and kill them with `/stop <pid>`. They are also cleaned up when you exit the REPL.
@@ -226,8 +226,8 @@ The Rich-based renderer surfaces the agent's internal events as distinct visual 
 - **Tool-calling support varies.** If a model chats back without ever invoking tools, swap to one that supports OpenAI-style `tools` (Qwen 2.5 Instruct, Llama 3.1 8B Instruct, Hermes 3, etc.).
 - **Context windows.** Conversation history grows until `/clear`. On small-context models, long sessions will start dropping the earliest turns — clear when in doubt. The tool-call loop is also capped at 25 iterations per user turn by default (`--max-iters` to raise it).
 - **Windows consoles.** The CLI forces UTF-8 on stdout/stderr so Rich's glyphs survive on legacy `cmd.exe`. If you still see mojibake, run inside Windows Terminal or PowerShell 7+.
-- **`.lmcc/` directory.** Background-process logs land in `<cwd>/.lmcc/`. Add it to `.gitignore` in any project you point lmcc at.
-- **REPL history.** Your typed prompts persist to `~/.lmcc_history` across sessions (prompt_toolkit `FileHistory`). Delete the file to wipe it.
+- **`.aquila/` directory.** Background-process logs land in `<cwd>/.aquila/`. Add it to `.gitignore` in any project you point aquila at.
+- **REPL history.** Your typed prompts persist to `~/.aquila_history` across sessions (prompt_toolkit `FileHistory`). Delete the file to wipe it.
 - **Network access.** The web tools hit DuckDuckGo and arbitrary URLs directly — no proxy support, no robots.txt enforcement, no auth.
 - **No sandboxing of `cwd`.** Tools resolve relative paths against `state.cwd`, but absolute paths are honored. A model that asks to read `C:\Windows\...` will get to read it. Run inside a VM if that's a concern.
 
@@ -251,7 +251,7 @@ In plan mode the model can only `read_file`, `grep`, `list_dir`, etc. It produce
 **One-shot from the shell**
 
 ```powershell
-lmcc "summarize every TODO comment in this repo"
+aquila "summarize every TODO comment in this repo"
 ```
 The agent runs `grep`, formats the findings, and exits.
 
@@ -265,12 +265,12 @@ The conversation history is preserved; the next turn just goes to the new model.
 
 ## Why the name
 
-**LMCC** = **L**ocal **M**ode — **C**ommand & **C**onquer. The harness gives a local LM Studio model the same kind of "drive the terminal, edit files, run servers" surface area that hosted agents get, so you can point any tool-calling model at a repo and let it work.
+**Aquila** was the eagle standard carried at the head of every Roman legion. It was the rallying point in battle and the legal embodiment of the legion itself — losing the aquila was a disaster a legion might never recover from. This harness plays the same role for a local model: it's the standard the agent rallies around, the thing that turns a loose LM Studio process into a coordinated unit that can drive the terminal, edit files, and run servers on your behalf.
 
 ## Project layout
 
 ```
-lmcc/
+aquila/
 ├── __init__.py
 ├── __main__.py     # CLI entry: arg parsing, model selection, REPL launch
 ├── agent.py        # tool-call loop, system prompt, plan mode, streaming

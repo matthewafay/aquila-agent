@@ -8,8 +8,8 @@ import httpx
 from openai import OpenAI
 
 
-DEFAULT_BASE_URL = os.environ.get("LMCC_BASE_URL", "http://localhost:1234/v1")
-DEFAULT_API_KEY = os.environ.get("LMCC_API_KEY", "lm-studio")
+DEFAULT_BASE_URL = os.environ.get("AQUILA_BASE_URL", "http://localhost:1234/v1")
+DEFAULT_API_KEY = os.environ.get("AQUILA_API_KEY", "lm-studio")
 
 
 @dataclass

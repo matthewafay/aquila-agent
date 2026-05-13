@@ -186,7 +186,7 @@ def run_shell(command: str, *, state: AgentState) -> str:
 
 def run_shell_background(command: str, *, state: AgentState) -> str:
     """Spawn a process detached from the agent. Returns immediately with a PID."""
-    log_dir = state.cwd / ".lmcc"
+    log_dir = state.cwd / ".aquila"
     log_dir.mkdir(exist_ok=True)
     log_path = log_dir / f"bg_{abs(hash(command)) % 10_000_000}.log"
     log = open(log_path, "w", encoding="utf-8", errors="replace")
@@ -275,7 +275,7 @@ def web_search(query: str, max_results: int = 5, *, state: AgentState) -> str:
 
 def web_fetch(url: str, *, state: AgentState) -> str:
     try:
-        with httpx.Client(follow_redirects=True, timeout=30, headers={"User-Agent": "lmcc/0.1"}) as c:
+        with httpx.Client(follow_redirects=True, timeout=30, headers={"User-Agent": "aquila/0.1"}) as c:
             r = c.get(url)
             r.raise_for_status()
     except Exception as e:
@@ -457,7 +457,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "name": "run_shell_background",
             "description": (
                 "Start a LONG-RUNNING command (dev server, watcher, etc.) in the background. "
-                "Returns immediately with a PID. Output goes to a log file at .lmcc/bg_*.log inside the cwd. "
+                "Returns immediately with a PID. Output goes to a log file at .aquila/bg_*.log inside the cwd. "
                 "Use this for `npm run dev`, `npx serve`, `vite`, `python -m http.server`, etc."
             ),
             "parameters": {

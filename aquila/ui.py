@@ -268,7 +268,7 @@ class REPL:
         self.agent = agent
         self.console = Console()
         self.renderer = EventRenderer(self.console)
-        history_path = Path.home() / ".lmcc_history"
+        history_path = Path.home() / ".aquila_history"
         self.session: PromptSession[str] = PromptSession(
             history=FileHistory(str(history_path)),
             completer=WordCompleter(SLASH_COMMANDS, ignore_case=True, sentence=True),
@@ -455,7 +455,7 @@ class REPL:
     def banner(self) -> None:
         self.console.print(Panel.fit(
             Text.from_markup(
-                "[bold]lmcc[/] — local coding agent\n"
+                "[bold]aquila[/] — local coding agent\n"
                 f"model: [cyan]{self.agent.config.model}[/]\n"
                 f"cwd:   [cyan]{self.agent.config.cwd}[/]\n"
                 "[dim]/help for commands, Ctrl+D to exit[/]"

@@ -17,7 +17,7 @@ from .tools import (
 )
 
 
-SYSTEM_PROMPT = """You are lmcc, a terminal coding agent running locally against an LM Studio model.
+SYSTEM_PROMPT = """You are aquila, a terminal coding agent running locally against an LM Studio model.
 
 You have tools to read/write/edit files, list directories, run shell commands (foreground and background), glob, grep, search the web, fetch URLs, and maintain a structured task list. You operate the user's machine directly. Your job is to DO the work yourself by calling tools, not to instruct the user on how to do it.
 

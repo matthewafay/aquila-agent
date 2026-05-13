@@ -24,7 +24,7 @@ from .ui import REPL, EventRenderer
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(prog="lmcc", description="Local coding agent backed by LM Studio.")
+    p = argparse.ArgumentParser(prog="aquila", description="Local coding agent backed by LM Studio.")
     p.add_argument("--base-url", default=DEFAULT_BASE_URL, help="LM Studio base URL (default %(default)s)")
     p.add_argument("--api-key", default=DEFAULT_API_KEY, help="API key for the local server (default %(default)s)")
     p.add_argument("--model", default=None, help="Model id to use (defaults to the first loaded model)")
