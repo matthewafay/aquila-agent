@@ -72,33 +72,55 @@ class LMStudioClient:
             return False
 
     def get_model_context_length(self, model_id: str) -> int | None:
-        """Look up the loaded context length for a model via LM Studio's
-        /v1/models/{id} endpoint, which adds non-standard fields beyond the
-        OpenAI schema. Returns None if the server doesn't expose it (other
-        OpenAI-compatible servers usually don't). Result is cached per-model."""
+        """Look up the loaded context length for a model. Result is cached
+        per-model. Returns None if no source exposes it.
+
+        Tries LM Studio's native API at /api/v0/models/<id> first — that's
+        where modern LM Studio exposes `loaded_context_length` and other rich
+        metadata. The OpenAI-compat /v1/models/<id> endpoint typically only
+        returns the basic schema (id/object/owned_by). Falls back to the v1
+        endpoint for other OpenAI-compatible servers (vLLM, llama.cpp) that
+        do add non-standard fields there."""
         if model_id in self._ctx_cache:
             return self._ctx_cache[model_id]
+
+        candidates: list[str] = []
+        # LM Studio native API: strip the trailing /v1 (if present) and use
+        # /api/v0/models/<id>.
+        root = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
+        candidates.append(f"{root}/api/v0/models/{model_id}")
+        candidates.append(f"{self.base_url}/models/{model_id}")
+
+        for url in candidates:
+            value = self._fetch_context_length(url)
+            if value is not None:
+                self._ctx_cache[model_id] = value
+                return value
+
+        self._ctx_cache[model_id] = None
+        return None
+
+    def _fetch_context_length(self, url: str) -> int | None:
+        """Hit `url`, pick out a context-length field. Returns None on any
+        failure (HTTP error, no field present, etc.) so the caller can try the
+        next candidate URL."""
         try:
             with httpx.Client(timeout=5) as c:
-                r = c.get(
-                    f"{self.base_url}/models/{model_id}",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                )
+                r = c.get(url, headers={"Authorization": f"Bearer {self.api_key}"})
             if r.status_code >= 400:
-                self._ctx_cache[model_id] = None
                 return None
             data = r.json()
         except Exception:
-            self._ctx_cache[model_id] = None
             return None
-        # LM Studio exposes loaded_context_length; fall back to a few other
-        # plausible names that other OpenAI-compatible servers might use.
+        if not isinstance(data, dict):
+            return None
+        # Prefer loaded_context_length (the value actually configured for this
+        # session) over max_context_length (the model's hard ceiling), so the
+        # display reflects what's really in effect.
         for key in ("loaded_context_length", "max_context_length", "context_length", "n_ctx"):
-            v = data.get(key) if isinstance(data, dict) else None
+            v = data.get(key)
             if isinstance(v, int) and v > 0:
-                self._ctx_cache[model_id] = v
                 return v
-        self._ctx_cache[model_id] = None
         return None
 
     def chat(
