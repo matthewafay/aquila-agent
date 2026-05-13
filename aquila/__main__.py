@@ -19,7 +19,7 @@ _force_utf8_io()
 from rich.console import Console
 
 from .agent import Agent, AgentConfig
-from .client import DEFAULT_API_KEY, DEFAULT_BASE_URL, LMStudioClient
+from .client import DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_REQUEST_TIMEOUT, LMStudioClient
 from .ui import REPL, EventRenderer
 
 
@@ -31,6 +31,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--cwd", default=None, help="Working directory for file/shell tools (defaults to current dir)")
     p.add_argument("--temperature", type=float, default=0.2)
     p.add_argument("--max-iters", type=int, default=25, help="Max tool-call iterations per user turn")
+    p.add_argument(
+        "--request-timeout",
+        type=float,
+        default=DEFAULT_REQUEST_TIMEOUT,
+        help=(
+            "Per-request timeout in seconds for model calls to LM Studio "
+            "(default %(default)s; also settable via AQUILA_REQUEST_TIMEOUT). "
+            "Raise this if you hit 'Model call failed: timed out' on long generations."
+        ),
+    )
     p.add_argument("prompt", nargs="*", help="If provided, run a one-shot prompt and exit")
     return p.parse_args(argv)
 
@@ -39,7 +49,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     console = Console()
 
-    client = LMStudioClient(base_url=args.base_url, api_key=args.api_key)
+    client = LMStudioClient(
+        base_url=args.base_url,
+        api_key=args.api_key,
+        request_timeout=args.request_timeout,
+    )
 
     try:
         models = client.list_models()

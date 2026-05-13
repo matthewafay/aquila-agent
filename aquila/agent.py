@@ -19,6 +19,28 @@ from .tools import (
 
 
 MAX_VERIFICATION_CYCLES = 2
+MODEL_RETRY_DELAY_SECS = 2.0
+
+
+try:
+    # openai SDK exposes typed exception classes for transient failures.
+    from openai import APIConnectionError, APITimeoutError
+    _RETRYABLE_MODEL_EXC: tuple[type[BaseException], ...] = (APIConnectionError, APITimeoutError)
+except ImportError:
+    _RETRYABLE_MODEL_EXC = ()
+
+
+def _is_retryable_model_error(e: BaseException) -> bool:
+    """Decide whether a failed model call is worth retrying once.
+
+    Retry on timeout / connection errors (both safe — chat completions have no
+    side effects). Skip retry on programming errors like bad model id, malformed
+    requests, etc., where the second attempt would just waste user time.
+    """
+    if isinstance(e, _RETRYABLE_MODEL_EXC):
+        return True
+    msg = str(e).lower()
+    return "timeout" in msg or "timed out" in msg or "connection" in msg
 
 
 SYSTEM_PROMPT = """You are aquila, a terminal coding agent running locally against an LM Studio model.
@@ -152,15 +174,14 @@ class Agent:
         the iteration cap fires. Returns the final assistant text (which may be a
         sentinel like '[error] ...' or '[stopped: ...]' on failure)."""
         for iteration in range(1, self.config.max_tool_iters + 1):
-            try:
-                content, tool_calls = self._one_round(iteration)
-            except Exception as e:
-                self._emit("error", {"message": f"Model call failed: {e}"})
+            content, tool_calls, err = self._one_round_with_retry(iteration)
+            if err is not None:
+                self._emit("error", {"message": f"Model call failed: {err}"})
                 # Pop the trailing user message so the user can retry. Works for
                 # both the original user input and an injected verification prompt.
                 if self.messages and self.messages[-1].get("role") == "user":
                     self.messages.pop()
-                return f"[error] {e}"
+                return f"[error] {err}"
 
             assistant_msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
             if tool_calls:
@@ -200,8 +221,65 @@ class Agent:
                     "content": result,
                 })
 
-        self._emit("error", {"message": "Hit max tool iterations"})
-        return "[stopped: max tool iterations reached]"
+        return self._wrap_up_after_cap()
+
+    def _one_round_with_retry(self, iteration: int) -> tuple[str, list[dict[str, Any]], Exception | None]:
+        """Run a single model round, retrying once on transient errors (timeout /
+        connection failure). Returns (content, tool_calls, error)."""
+        try:
+            content, tool_calls = self._one_round(iteration)
+            return content, tool_calls, None
+        except Exception as e:
+            if not _is_retryable_model_error(e):
+                return "", [], e
+            self._emit("model_retry", {
+                "error": str(e),
+                "delay": MODEL_RETRY_DELAY_SECS,
+                "iteration": iteration,
+            })
+            time.sleep(MODEL_RETRY_DELAY_SECS)
+            try:
+                content, tool_calls = self._one_round(iteration)
+                return content, tool_calls, None
+            except Exception as e2:
+                return "", [], e2
+
+    def _wrap_up_after_cap(self) -> str:
+        """Iteration cap fired with the model still wanting to call tools. Instead
+        of returning a bare sentinel, inject a final system nudge and ask the
+        model once more (with no tools available) for a human-readable summary of
+        where it got to. Gives the user a graceful landing instead of an abrupt
+        cut."""
+        self._emit("iteration_cap", {"max_iters": self.config.max_tool_iters})
+        self.messages.append({
+            "role": "system",
+            "content": (
+                f"You have used your full budget of {self.config.max_tool_iters} tool iterations "
+                "for this turn and cannot call any more tools. In one or two short sentences, "
+                "summarize what you accomplished and what is still unfinished so the user can "
+                "decide how to proceed. Do not attempt any further tool calls."
+            ),
+        })
+        try:
+            resp = self.client.chat(
+                model=self.config.model,
+                messages=self.messages,
+                tools=None,
+                temperature=self.config.temperature,
+                stream=False,
+            )
+        except Exception as e:
+            self._emit("error", {"message": f"Could not produce wrap-up summary: {e}"})
+            return f"[stopped: max tool iterations reached; summary failed: {e}]"
+
+        if not resp.choices:
+            return "[stopped: max tool iterations reached]"
+        content = (resp.choices[0].message.content or "").strip()
+        if not content:
+            return "[stopped: max tool iterations reached]"
+        self.messages.append({"role": "assistant", "content": content})
+        self._emit("assistant_text", {"text": content})
+        return content
 
     def _verify_and_fix(self, final_text: str) -> str:
         """Run cheap syntax checks on files the model touched this turn. If

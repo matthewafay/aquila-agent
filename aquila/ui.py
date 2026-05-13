@@ -296,6 +296,21 @@ class EventRenderer:
             expand=False,
         ))
 
+    def _on_model_retry(self, data: dict[str, Any]) -> None:
+        err = data.get("error", "")
+        delay = data.get("delay", 0)
+        self.console.print(Text(
+            f"  ⟳ model call failed ({err}); retrying once after {delay:.0f}s…",
+            style="yellow",
+        ))
+
+    def _on_iteration_cap(self, data: dict[str, Any]) -> None:
+        cap = data.get("max_iters", "?")
+        self.console.print(Text(
+            f"  · hit {cap}-iteration cap — asking model for a wrap-up summary (raise with --max-iters)",
+            style="yellow",
+        ))
+
     def _on_error(self, data: dict[str, Any]) -> None:
         self.console.print(f"[bold red]error:[/] {data.get('message', '')}")
 

@@ -68,12 +68,18 @@ aquila --cwd C:\Code\some-project
 
 # Tuning
 aquila --temperature 0.4 --max-iters 40
+
+# Raise the model-call timeout if you hit "Model call failed: timed out" on
+# long generations (default 1200s; transient timeout/connection errors are
+# already auto-retried once before the turn bails).
+aquila --request-timeout 1800
 ```
 
 Environment overrides (so you don't have to pass flags every time):
 
 - `AQUILA_BASE_URL` — default base URL (e.g. `http://localhost:1234/v1`)
 - `AQUILA_API_KEY` — default API key (LM Studio accepts anything; defaults to `lm-studio`)
+- `AQUILA_REQUEST_TIMEOUT` — default per-request timeout in seconds for model calls (default `1200`)
 
 ## REPL commands
 
@@ -173,6 +179,11 @@ Each user turn runs a bounded tool-call loop (default **25 iterations**, configu
    - Tool output is truncated to ~16 KB before being appended to the conversation as a `role: "tool"` message.
 4. The loop continues until the model produces a turn with **no tool calls** (final answer) or hits the iteration cap.
 5. **Post-turn verification.** Once the model declares it's done, the agent runs cheap syntax checks on every file it just touched (`.py` via `compile()`, `.json` via `json.loads`, `.toml` via `tomllib`). If anything fails to parse, the errors are fed back to the model as a synthetic user turn and it gets a chance to self-correct — capped at **2 auto-fix attempts**. Anything still broken after that is surfaced as a red `needs your attention` panel so you can review. Other file types are skipped (no false positives on languages we don't have a stdlib parser for), and the phase is a no-op in plan mode.
+
+**Resilience.** Two common failure modes are handled inline instead of bailing the turn:
+
+- **Transient model-call errors** (timeout / connection failure from LM Studio) are **auto-retried once** with a 2-second pause. You'll see a yellow `⟳ model call failed … retrying once` line; if the retry also fails, the turn ends with the error and your prompt is preserved for re-submission. The hard timeout is `--request-timeout` / `AQUILA_REQUEST_TIMEOUT` (default 1200s). Non-transient errors (bad model id, malformed request) skip the retry.
+- **Iteration-cap exhaustion.** Instead of returning a bare `[stopped: max tool iterations reached]`, the agent sends the model one final call *without* tools asking for a one-sentence summary of where it got to. You get a graceful landing — "I created X and Y but still need to do Z" — and can decide whether to follow up or bump `--max-iters`.
 
 The system prompt explicitly tells the model to **do the work itself** rather than instruct the user (e.g. it will run `npm install` via `run_shell` instead of telling you to), to use `run_shell_background` for anything long-running, and to keep the todo list updated for multi-step jobs.
 

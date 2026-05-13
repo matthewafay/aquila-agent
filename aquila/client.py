@@ -12,6 +12,25 @@ DEFAULT_BASE_URL = os.environ.get("AQUILA_BASE_URL", "http://localhost:1234/v1")
 DEFAULT_API_KEY = os.environ.get("AQUILA_API_KEY", "lm-studio")
 
 
+def _default_request_timeout() -> float:
+    """Read AQUILA_REQUEST_TIMEOUT from the environment, falling back to 1200s.
+
+    Local-model first-token latency on big-context turns can easily push past the
+    OpenAI SDK's stock 600s ceiling, so the default is generous and the CLI lets
+    you crank it further with --request-timeout.
+    """
+    raw = os.environ.get("AQUILA_REQUEST_TIMEOUT")
+    if raw is None:
+        return 1200.0
+    try:
+        return float(raw)
+    except ValueError:
+        return 1200.0
+
+
+DEFAULT_REQUEST_TIMEOUT = _default_request_timeout()
+
+
 @dataclass
 class ModelInfo:
     id: str
@@ -21,10 +40,16 @@ class ModelInfo:
 class LMStudioClient:
     """Thin wrapper around the OpenAI SDK pointed at a local LM Studio server."""
 
-    def __init__(self, base_url: str = DEFAULT_BASE_URL, api_key: str = DEFAULT_API_KEY):
+    def __init__(
+        self,
+        base_url: str = DEFAULT_BASE_URL,
+        api_key: str = DEFAULT_API_KEY,
+        request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+    ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
-        self._sdk = OpenAI(base_url=self.base_url, api_key=self.api_key, timeout=600)
+        self.request_timeout = request_timeout
+        self._sdk = OpenAI(base_url=self.base_url, api_key=self.api_key, timeout=request_timeout)
 
     def list_models(self) -> list[ModelInfo]:
         try:
