@@ -14,74 +14,39 @@ A terminal AI agent harness that talks to a local **LM Studio** server. Acts lik
 - **Persistent REPL history** — your previous prompts are in `~/.aquila_history`, with slash-command tab completion
 - **OpenAI-compatible** — uses the official `openai` SDK pointed at LM Studio, so the agent loop also works against any other OpenAI-compatible local server (Ollama's OpenAI shim, llama.cpp server, vLLM, etc.) with `--base-url`
 
-## Prerequisites — set up LM Studio first
+## Setup
 
-**Aquila does nothing on its own.** It is a client; the actual model lives in LM Studio. You must have LM Studio installed, running in **server mode**, and with a tool-calling model loaded **before** you start `aquila`. If any of those three things isn't true, `aquila` will exit with an error on launch.
+**Requirements:** Python 3.10+ and a UTF-8 terminal.
 
-1. **Install LM Studio.** Download from [lmstudio.ai](https://lmstudio.ai/) (Windows / macOS / Linux builds). Install and launch it.
-2. **Download a tool-calling-capable model.** Open the **Discover** (search) tab inside LM Studio and pull one of:
-   - Qwen 2.5 Instruct (7B / 14B / 32B) — recommended starting point
-   - Qwen 2.5 Coder Instruct
-   - Llama 3.1 / 3.2 Instruct
-   - Mistral Small Instruct
-   - Hermes 3
-   - Anything else LM Studio tags as supporting **"Tool Use"** in the model card
-   Models without tool-calling support will just chat back at you and never touch files.
-3. **Load the model.** Go to the **Chat** or **Developer** tab and select the model from the top dropdown. Wait until it shows as fully loaded into memory (you'll see VRAM/RAM usage stabilize).
-4. **Start the server.** Open the **Developer** tab on the left sidebar, then click **Start Server**. The default is `http://localhost:1234` — leave it there unless you have a conflict. You should see "Server running" with a green indicator.
-5. **(Optional) Verify it's reachable.** From a terminal:
-   ```powershell
-   curl http://localhost:1234/v1/models
-   ```
-   You should get back JSON listing the loaded model(s). If this fails, `aquila` will fail too.
+Aquila is a client — the model lives in [LM Studio](https://lmstudio.ai/), which has to be running with a tool-capable model loaded *before* `aquila` starts.
 
-Only after all five steps should you run `aquila`. The CLI's first action is to call `/v1/models` against LM Studio; if the server is down or no model is loaded, it prints a hint and exits with code 2.
+### 1. Get LM Studio serving a model
 
-### Other requirements
-
-- Python **3.10+**
-- A terminal that handles UTF-8 (Windows Terminal, PowerShell 7+, any modern macOS/Linux terminal)
-
-## Install
-
-Clone and install in editable mode:
+Install LM Studio, then in the **Discover** tab download a model tagged **"Tool Use"** (Qwen 2.5 Coder Instruct, Llama 3.1 Instruct, and Hermes 3 are solid defaults). Load it via the model dropdown, then open **Developer → Start Server** (default `http://localhost:1234`). Quick sanity check:
 
 ```powershell
-git clone https://github.com/<you>/aquila-agent.git
+curl http://localhost:1234/v1/models
+```
+
+If that returns JSON listing your model, you're good. If not, fix LM Studio first — `aquila` calls the same endpoint on launch and will exit with code 2 if it's unreachable.
+
+### 2. Install aquila
+
+```powershell
+git clone https://github.com/matthewafay/aquila-agent.git
 cd aquila-agent
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1     # Windows
-# source .venv/bin/activate      # macOS / Linux
+.\.venv\Scripts\Activate.ps1       # macOS/Linux: source .venv/bin/activate
 pip install -e .
 ```
 
-This installs the `aquila` console script and pulls in the dependencies declared in [pyproject.toml](pyproject.toml):
-
-- `openai>=1.40` — OpenAI Python SDK, pointed at the LM Studio server
-- `rich>=13.7` — terminal rendering (panels, syntax highlighting, live streaming)
-- `prompt_toolkit>=3.0` — REPL input with history + slash-command completion
-- `duckduckgo-search>=6.2` — the `web_search` tool
-- `httpx>=0.27` — the `web_fetch` tool and a connectivity ping
-- `beautifulsoup4>=4.12` — HTML → text for `web_fetch`
-
-If you'd rather not install the script entry point:
-
-```powershell
-pip install openai rich prompt_toolkit duckduckgo-search httpx beautifulsoup4
-python -m aquila
-```
-
-## Quick start
-
-1. Open LM Studio → **Developer** tab → **Start Server** (port `1234`).
-2. Load a tool-calling-capable model in LM Studio.
-3. From the terminal:
+### 3. Run
 
 ```powershell
 aquila
 ```
 
-You should see a banner showing the model and the working directory, then a `»` prompt.
+You'll see a banner with the model and working directory, then a `»` prompt. The directory you launch from becomes the agent's working directory — `cd` into the project you want it to operate on, or pass `--cwd <path>`.
 
 ## CLI flags
 
