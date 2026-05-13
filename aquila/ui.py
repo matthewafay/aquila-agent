@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import json
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ SLASH_COMMANDS = [
     "/help", "/model", "/models", "/clear", "/cwd", "/history",
     "/plan", "/approve", "/exec", "/cancel",
     "/todos", "/processes", "/stop",
+    "/queue",
     "/exit", "/quit",
 ]
 
@@ -311,6 +313,9 @@ class EventRenderer:
             style="yellow",
         ))
 
+    def _on_interrupted(self, data: dict[str, Any]) -> None:
+        self.console.print(Text("  ✗ interrupted — rolled back this turn", style="yellow"))
+
     def _on_error(self, data: dict[str, Any]) -> None:
         self.console.print(f"[bold red]error:[/] {data.get('message', '')}")
 
@@ -326,6 +331,9 @@ class REPL:
             history=FileHistory(str(history_path)),
             completer=WordCompleter(SLASH_COMMANDS, ignore_case=True, sentence=True),
         )
+        # Follow-up prompts queued via /queue. Drained in order after the
+        # current turn finishes normally; cleared on Ctrl+C interrupt.
+        self.pending_prompts: deque[str] = deque()
         self.agent.on_event = self.renderer
 
     # ---------- slash commands ----------
@@ -347,6 +355,7 @@ class REPL:
             ("/todos", "show the current task list"),
             ("/processes", "show background processes"),
             ("/stop <pid>", "stop a background process by PID"),
+            ("/queue [prompt]", "queue a follow-up prompt to run after the next turn (no arg = show queue; 'clear' = empty it)"),
             ("/exit, /quit", "leave the app (Ctrl+D also works)"),
         ]
         for k, v in rows:
@@ -469,6 +478,27 @@ class REPL:
             return
         self.console.print(stop_process(pid, state=self.agent.state))
 
+    def _cmd_queue(self, arg: str) -> None:
+        arg = arg.strip()
+        if not arg:
+            if not self.pending_prompts:
+                self.console.print("[dim](queue is empty)[/]")
+                return
+            self.console.print(Text(f"queued ({len(self.pending_prompts)}):", style="dim"))
+            for i, q in enumerate(self.pending_prompts, 1):
+                self.console.print(f"  {i}. {q}")
+            return
+        if arg.lower() == "clear":
+            n = len(self.pending_prompts)
+            self.pending_prompts.clear()
+            self.console.print(f"[dim]cleared {n} queued prompt(s)[/]")
+            return
+        self.pending_prompts.append(arg)
+        self.console.print(Text(
+            f"  + queued ({len(self.pending_prompts)} total): {arg[:80]}",
+            style="dim cyan",
+        ))
+
     def _handle_slash(self, line: str) -> bool:
         parts = line.strip().split(maxsplit=1)
         cmd = parts[0].lower()
@@ -499,6 +529,8 @@ class REPL:
             self._cmd_processes()
         elif cmd == "/stop":
             self._cmd_stop(arg)
+        elif cmd == "/queue":
+            self._cmd_queue(arg)
         else:
             self.console.print(f"[yellow]unknown command:[/] {cmd}  (try /help)")
         return True
@@ -532,11 +564,57 @@ class REPL:
                     if not self._handle_slash(line):
                         return
                     continue
-                try:
-                    self.agent.send(line)
-                except KeyboardInterrupt:
-                    self.console.print("[yellow]interrupted[/]")
-                except Exception as e:
-                    self.console.print(f"[red]error:[/] {e}")
+                self._run_with_queue_drain(line)
         finally:
             self.agent.state.cleanup()
+
+    def _run_with_queue_drain(self, line: str) -> None:
+        """Send `line` to the agent, then drain pending_prompts in order. On
+        Ctrl+C interrupt, offer an inline 'redirect » ' prompt — empty Enter
+        just cancels, anything else gets re-sent as the next turn (steering).
+        Queued follow-ups are cleared on interrupt since they were authored
+        against context that has now been rolled back."""
+        while True:
+            try:
+                result = self.agent.send(line)
+            except KeyboardInterrupt:
+                # Safety net — agent.send normally catches this internally and
+                # returns '[interrupted]', but a second Ctrl+C during the
+                # rollback path could land here.
+                self.console.print("[yellow]interrupted[/]")
+                result = "[interrupted]"
+            except Exception as e:
+                self.console.print(f"[red]error:[/] {e}")
+                return
+
+            if result == "[interrupted]":
+                if self.pending_prompts:
+                    n = len(self.pending_prompts)
+                    self.pending_prompts.clear()
+                    self.console.print(Text(
+                        f"  (cleared {n} queued prompt(s) after interrupt)",
+                        style="dim",
+                    ))
+                try:
+                    redirect = self.session.prompt("redirect » ")
+                except (EOFError, KeyboardInterrupt):
+                    self.console.print()
+                    return
+                if not redirect.strip():
+                    return  # empty Enter = just cancel, back to normal prompt
+                if redirect.lstrip().startswith("/"):
+                    # Slash commands at the redirect prompt run inline and
+                    # then return to the normal prompt — we don't loop on them.
+                    self._handle_slash(redirect)
+                    return
+                line = redirect
+                continue
+
+            # Normal completion — pull the next queued prompt if any.
+            if not self.pending_prompts:
+                return
+            line = self.pending_prompts.popleft()
+            self.console.print(Text(
+                f"  → running queued prompt ({len(self.pending_prompts)} remaining): {line[:80]}",
+                style="dim cyan",
+            ))

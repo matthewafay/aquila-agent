@@ -157,17 +157,27 @@ class Agent:
     # ---------- main turn ----------
 
     def send(self, user_input: str) -> str:
+        # Snapshot conversation length so we can roll back cleanly on Ctrl+C.
+        # Without this, an interrupt mid-tool-call leaves the history with an
+        # assistant turn containing tool_calls but no matching tool responses,
+        # which is invalid against the chat-completions schema.
+        snapshot_len = len(self.messages)
         self.state.touched_files.clear()
         self.messages.append({"role": "user", "content": user_input})
 
-        final_text = self._run_tool_loop()
-
-        # If the model call errored or hit the iteration cap, skip verification —
-        # the user will retry, and we'll verify fresh on the next turn.
-        if final_text.startswith(("[error]", "[stopped:")):
-            return final_text
-
-        return self._verify_and_fix(final_text)
+        try:
+            final_text = self._run_tool_loop()
+            # If the model call errored or hit the iteration cap, skip verification —
+            # the user will retry, and we'll verify fresh on the next turn.
+            if final_text.startswith(("[error]", "[stopped:")):
+                return final_text
+            return self._verify_and_fix(final_text)
+        except KeyboardInterrupt:
+            # Hard reset: drop the user message, any partial assistant turn, and
+            # any partial tool responses added during this turn.
+            del self.messages[snapshot_len:]
+            self._emit("interrupted", {})
+            return "[interrupted]"
 
     def _run_tool_loop(self) -> str:
         """Drive the model<->tools loop until the model returns no tool calls or
@@ -380,35 +390,48 @@ class Agent:
             temperature=self.config.temperature,
             stream=True,
         )
-        for event in stream:
-            if not event.choices:
-                continue
-            delta = event.choices[0].delta
-            if getattr(delta, "content", None):
-                content_parts.append(delta.content)
-                token_count += 1
-                self._emit("stream_delta", {
-                    "text": delta.content,
-                    "elapsed": time.monotonic() - start,
-                    "tokens": token_count,
-                })
-            for tc_chunk in getattr(delta, "tool_calls", None) or []:
-                idx = tc_chunk.index
-                slot = tc_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
-                if getattr(tc_chunk, "id", None):
-                    slot["id"] = tc_chunk.id
-                fn = getattr(tc_chunk, "function", None)
-                if fn is not None:
-                    if getattr(fn, "name", None):
-                        slot["name"] = fn.name
-                    if getattr(fn, "arguments", None):
-                        slot["arguments"] += fn.arguments
-                token_count += 1
-                self._emit("stream_progress", {
-                    "elapsed": time.monotonic() - start,
-                    "tokens": token_count,
-                })
-        self._emit("turn_end", {"iteration": iteration, "elapsed": time.monotonic() - start, "tokens": token_count})
+        try:
+            for event in stream:
+                if not event.choices:
+                    continue
+                delta = event.choices[0].delta
+                if getattr(delta, "content", None):
+                    content_parts.append(delta.content)
+                    token_count += 1
+                    self._emit("stream_delta", {
+                        "text": delta.content,
+                        "elapsed": time.monotonic() - start,
+                        "tokens": token_count,
+                    })
+                for tc_chunk in getattr(delta, "tool_calls", None) or []:
+                    idx = tc_chunk.index
+                    slot = tc_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                    if getattr(tc_chunk, "id", None):
+                        slot["id"] = tc_chunk.id
+                    fn = getattr(tc_chunk, "function", None)
+                    if fn is not None:
+                        if getattr(fn, "name", None):
+                            slot["name"] = fn.name
+                        if getattr(fn, "arguments", None):
+                            slot["arguments"] += fn.arguments
+                    token_count += 1
+                    self._emit("stream_progress", {
+                        "elapsed": time.monotonic() - start,
+                        "tokens": token_count,
+                    })
+        finally:
+            # Always release the HTTP connection and tell the UI to take down
+            # the live streaming panel — both on normal completion AND on
+            # Ctrl+C, where the exception still propagates out after cleanup.
+            try:
+                stream.close()
+            except Exception:
+                pass
+            self._emit("turn_end", {
+                "iteration": iteration,
+                "elapsed": time.monotonic() - start,
+                "tokens": token_count,
+            })
 
         content = "".join(content_parts)
         if content:

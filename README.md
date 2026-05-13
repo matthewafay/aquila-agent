@@ -99,7 +99,23 @@ Anything not starting with `/` is sent to the model.
 | `/todos`             | show the current task list                                  |
 | `/processes`         | list background processes started by the agent              |
 | `/stop <pid>`        | terminate a background process by PID                       |
+| `/queue [prompt]`    | queue a follow-up prompt; no-arg shows the queue, `clear` empties it |
 | `/exit`, `/quit`     | leave (Ctrl+D also works)                                   |
+
+### Interrupting a turn
+
+Press **Ctrl+C** while the model is working to cancel the current turn. The agent rolls back the conversation history to before your prompt (so there are no dangling `tool_calls` without responses), then shows a `redirect » ` prompt:
+
+- **Empty Enter** — just cancel, back to the normal `»` prompt.
+- **Type a new prompt** — submits it as the next turn (steering away from whatever the model was doing).
+
+Files written to disk and background processes spawned before the interrupt are NOT rolled back — only the model's memory of them is. The model will start the next turn fresh; if it needs to see what's on disk, it'll `read_file` like normal.
+
+### Queueing follow-up prompts
+
+Type `/queue <prompt>` one or more times *before* sending your main prompt. The main prompt runs first; when it finishes normally, queued prompts fire in order. `/queue` with no argument lists what's queued; `/queue clear` empties it. The queue is cleared automatically if you Ctrl+C mid-turn — queued prompts were authored against context that just got rolled back, so re-running them blind would be wrong.
+
+True mid-turn queueing (typing while the model is streaming) is a known TODO — it needs an asyncio refactor of the REPL so prompt_toolkit's input and Rich's Live display can coexist.
 
 ### Plan mode
 
