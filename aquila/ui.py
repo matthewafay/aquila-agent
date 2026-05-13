@@ -258,6 +258,44 @@ class EventRenderer:
         self._todos = data.get("todos", [])
         self.console.print(_render_todos(self._todos))
 
+    # ---------- verification events ----------
+
+    def _on_verify_start(self, data: dict[str, Any]) -> None:
+        files = data.get("files", [])
+        if not files:
+            return
+        self.console.print(Text(f"  · verifying {len(files)} file(s)…", style="dim cyan"))
+
+    def _on_verify_pass(self, data: dict[str, Any]) -> None:
+        files = data.get("files", [])
+        n = len(files)
+        if n:
+            self.console.print(Text(f"  ✓ verification passed ({n} file{'s' if n != 1 else ''})", style="green"))
+
+    def _on_verify_errors(self, data: dict[str, Any]) -> None:
+        cycle = data.get("cycle", 1)
+        max_cycles = data.get("max_cycles", 1)
+        errors = data.get("errors", [])
+        lines = [f"{e.get('path', '?')}\n  {e.get('message', '')}" for e in errors]
+        body = "\n\n".join(lines) if lines else "(no detail)"
+        self.console.print(Panel(
+            body,
+            title=f"[bold yellow]verification: errors found (attempt {cycle}/{max_cycles}, auto-fixing)[/]",
+            border_style="yellow",
+            expand=False,
+        ))
+
+    def _on_verify_failed(self, data: dict[str, Any]) -> None:
+        errors = data.get("errors", [])
+        lines = [f"{e.get('path', '?')}\n  {e.get('message', '')}" for e in errors]
+        body = "\n\n".join(lines) if lines else "(no detail)"
+        self.console.print(Panel(
+            body,
+            title="[bold red]needs your attention — verification could not auto-fix[/]",
+            border_style="red",
+            expand=False,
+        ))
+
     def _on_error(self, data: dict[str, Any]) -> None:
         self.console.print(f"[bold red]error:[/] {data.get('message', '')}")
 

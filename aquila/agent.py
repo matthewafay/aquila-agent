@@ -14,7 +14,11 @@ from .tools import (
     TOOL_SCHEMAS,
     build_dispatcher,
     execute_tool,
+    verify_touched_files,
 )
+
+
+MAX_VERIFICATION_CYCLES = 2
 
 
 SYSTEM_PROMPT = """You are aquila, a terminal coding agent running locally against an LM Studio model.
@@ -131,14 +135,31 @@ class Agent:
     # ---------- main turn ----------
 
     def send(self, user_input: str) -> str:
+        self.state.touched_files.clear()
         self.messages.append({"role": "user", "content": user_input})
 
+        final_text = self._run_tool_loop()
+
+        # If the model call errored or hit the iteration cap, skip verification —
+        # the user will retry, and we'll verify fresh on the next turn.
+        if final_text.startswith(("[error]", "[stopped:")):
+            return final_text
+
+        return self._verify_and_fix(final_text)
+
+    def _run_tool_loop(self) -> str:
+        """Drive the model<->tools loop until the model returns no tool calls or
+        the iteration cap fires. Returns the final assistant text (which may be a
+        sentinel like '[error] ...' or '[stopped: ...]' on failure)."""
         for iteration in range(1, self.config.max_tool_iters + 1):
             try:
                 content, tool_calls = self._one_round(iteration)
             except Exception as e:
                 self._emit("error", {"message": f"Model call failed: {e}"})
-                self.messages.pop()  # let the user retry
+                # Pop the trailing user message so the user can retry. Works for
+                # both the original user input and an injected verification prompt.
+                if self.messages and self.messages[-1].get("role") == "user":
+                    self.messages.pop()
                 return f"[error] {e}"
 
             assistant_msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
@@ -181,6 +202,63 @@ class Agent:
 
         self._emit("error", {"message": "Hit max tool iterations"})
         return "[stopped: max tool iterations reached]"
+
+    def _verify_and_fix(self, final_text: str) -> str:
+        """Run cheap syntax checks on files the model touched this turn. If
+        anything fails to parse, feed the errors back as a synthetic user turn
+        so the model can self-correct — capped at MAX_VERIFICATION_CYCLES. Any
+        errors that survive the auto-fix attempts are surfaced to the user."""
+        # Nothing to check in plan mode (writes are blocked) or if no files
+        # were touched.
+        if self.plan_mode or not self.state.touched_files:
+            return final_text
+
+        touched_str = sorted(str(p) for p in self.state.touched_files)
+        self._emit("verify_start", {"files": touched_str})
+
+        for cycle in range(1, MAX_VERIFICATION_CYCLES + 1):
+            errors = verify_touched_files(self.state)
+            if not errors:
+                self._emit("verify_pass", {"files": touched_str})
+                return final_text
+
+            error_payload = [{"path": str(p), "message": m} for p, m in errors]
+            self._emit("verify_errors", {
+                "cycle": cycle,
+                "max_cycles": MAX_VERIFICATION_CYCLES,
+                "errors": error_payload,
+            })
+
+            formatted = "\n".join(f"- {p}: {m}" for p, m in errors)
+            self.messages.append({
+                "role": "user",
+                "content": (
+                    "[automated verification] These files you just edited failed to parse:\n\n"
+                    f"{formatted}\n\n"
+                    "Fix them now with edit_file / write_file / multi_edit. "
+                    "When finished, reply briefly with what you changed."
+                ),
+            })
+            fix_text = self._run_tool_loop()
+            if fix_text.startswith(("[error]", "[stopped:")):
+                # Model failed mid-fix; surface what we have and bail out of the
+                # verification loop. The original final_text is more useful to
+                # the user than the error sentinel.
+                break
+            final_text = fix_text
+
+        remaining = verify_touched_files(self.state)
+        if remaining:
+            self._emit("verify_failed", {
+                "errors": [{"path": str(p), "message": m} for p, m in remaining],
+            })
+            final_text = (
+                final_text
+                + "\n\n[verification could not auto-fix the issues above — please review]"
+            )
+        else:
+            self._emit("verify_pass", {"files": touched_str})
+        return final_text
 
     # ---------- single model round-trip ----------
 

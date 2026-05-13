@@ -55,6 +55,7 @@ def write_file(path: str, content: str, *, state: AgentState) -> str:
     p = _resolve(path, state.cwd)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
+    state.touched_files.add(p)
     return f"Wrote {len(content)} chars to {p}"
 
 
@@ -69,6 +70,7 @@ def edit_file(path: str, old: str, new: str, *, state: AgentState) -> str:
     if count > 1:
         return f"ERROR: old string appears {count} times in {p}; make it unique with more context"
     p.write_text(text.replace(old, new, 1), encoding="utf-8")
+    state.touched_files.add(p)
     return f"Replaced 1 occurrence in {p}"
 
 
@@ -94,6 +96,7 @@ def multi_edit(path: str, edits: list[dict[str, str]], *, state: AgentState) -> 
     if text == original:
         return f"No changes (all edits matched but produced identical text) in {p}"
     p.write_text(text, encoding="utf-8")
+    state.touched_files.add(p)
     return f"Applied {len(edits)} edits to {p}"
 
 
@@ -364,6 +367,67 @@ def todo_write(todos: list[dict[str, str]], *, state: AgentState) -> str:
     state.todos = parsed
     done = sum(1 for t in parsed if t.status == "completed")
     return f"Todo list updated ({done}/{len(parsed)} complete)"
+
+
+# ---------- Post-turn verification ----------
+
+# Map file extension -> the cheap syntax check we know how to run.
+# Anything not in this map is skipped (no false positives on languages we
+# don't have a stdlib parser for).
+VERIFIABLE_EXTS: dict[str, str] = {
+    ".py": "python",
+    ".json": "json",
+    ".toml": "toml",
+}
+
+
+def verify_touched_files(state: AgentState) -> list[tuple[Path, str]]:
+    """Run cheap syntax checks on files the agent has written or edited this turn.
+
+    Returns a list of (path, error_message) tuples for files that failed to parse.
+    Files in unsupported languages, or that no longer exist, are skipped silently.
+    """
+    errors: list[tuple[Path, str]] = []
+    for p in sorted(state.touched_files):
+        if not p.exists() or not p.is_file():
+            continue
+        kind = VERIFIABLE_EXTS.get(p.suffix.lower())
+        if kind is None:
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            errors.append((p, f"could not read file: {e}"))
+            continue
+        err = _check_syntax(kind, text, p)
+        if err:
+            errors.append((p, err))
+    return errors
+
+
+def _check_syntax(kind: str, text: str, path: Path) -> str | None:
+    if kind == "python":
+        try:
+            compile(text, str(path), "exec")
+        except SyntaxError as e:
+            return f"SyntaxError at line {e.lineno or '?'}, col {e.offset or '?'}: {e.msg}"
+        except ValueError as e:
+            return f"ValueError: {e}"
+    elif kind == "json":
+        try:
+            json.loads(text)
+        except json.JSONDecodeError as e:
+            return f"JSONDecodeError at line {e.lineno}, col {e.colno}: {e.msg}"
+    elif kind == "toml":
+        try:
+            import tomllib  # Py 3.11+
+        except ImportError:
+            return None
+        try:
+            tomllib.loads(text)
+        except tomllib.TOMLDecodeError as e:
+            return f"TOMLDecodeError: {e}"
+    return None
 
 
 # ---------- Tool registry / schemas ----------

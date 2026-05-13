@@ -207,6 +207,7 @@ Each user turn runs a bounded tool-call loop (default **25 iterations**, configu
    - In plan mode, write/shell tools are blocked at the dispatcher level — the model gets `ERROR: '<tool>' is blocked in plan mode` and has to propose instead.
    - Tool output is truncated to ~16 KB before being appended to the conversation as a `role: "tool"` message.
 4. The loop continues until the model produces a turn with **no tool calls** (final answer) or hits the iteration cap.
+5. **Post-turn verification.** Once the model declares it's done, the agent runs cheap syntax checks on every file it just touched (`.py` via `compile()`, `.json` via `json.loads`, `.toml` via `tomllib`). If anything fails to parse, the errors are fed back to the model as a synthetic user turn and it gets a chance to self-correct — capped at **2 auto-fix attempts**. Anything still broken after that is surfaced as a red `needs your attention` panel so you can review. Other file types are skipped (no false positives on languages we don't have a stdlib parser for), and the phase is a no-op in plan mode.
 
 The system prompt explicitly tells the model to **do the work itself** rather than instruct the user (e.g. it will run `npm install` via `run_shell` instead of telling you to), to use `run_shell_background` for anything long-running, and to keep the todo list updated for multi-step jobs.
 
