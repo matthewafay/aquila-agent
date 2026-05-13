@@ -94,6 +94,21 @@ class AgentConfig:
     max_tool_iters: int = 25
     temperature: float = 0.2
     stream: bool = True
+    # Auto-compaction kicks in after a turn whenever total_tokens / context_length
+    # crosses this fraction. 0 disables auto-compaction (manual /compact still works).
+    auto_compact_threshold: float = 0.8
+
+
+COMPACTION_SUMMARY_PROMPT = """The conversation below is being compacted to free up context window.
+
+Produce a concise factual summary that the assistant can use to continue helping the user. Cover:
+- What the user has been trying to accomplish overall.
+- Files created, modified, or deleted (paths only, with a one-line purpose each).
+- Background processes started (PID + purpose if mentioned).
+- Decisions made, constraints established, or important findings.
+- Anything still in progress or unfinished.
+
+Be brief and factual. Plain prose, no markdown headers. Skip pleasantries and tool-call mechanics — focus on substance the assistant needs to remember."""
 
 
 @dataclass
@@ -103,6 +118,13 @@ class Agent:
     messages: list[dict[str, Any]] = field(default_factory=list)
     on_event: Callable[[str, dict[str, Any]], None] | None = None
     plan_mode: bool = False
+    # Tokens reported by the most recent response's usage.total_tokens, and the
+    # loaded context window from LM Studio. Both None until first known.
+    last_total_tokens: int | None = None
+    context_length: int | None = None
+    # Which warning thresholds we've already announced this conversation, so we
+    # don't spam the user every turn after crossing them.
+    _warned_levels: set[int] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.state = AgentState(cwd=self.config.cwd)
@@ -116,6 +138,15 @@ class Agent:
                     + f"\nPlatform: {platform.system()} {platform.release()}"
                 ),
             })
+        self._refresh_context_length()
+
+    def _refresh_context_length(self) -> None:
+        """Look up (or refresh from cache) the loaded context length for the
+        active model. Best-effort — leaves context_length None on failure."""
+        try:
+            self.context_length = self.client.get_model_context_length(self.config.model)
+        except Exception:
+            self.context_length = None
 
     def _emit(self, kind: str, data: dict[str, Any]) -> None:
         if self.on_event:
@@ -126,9 +157,15 @@ class Agent:
         self.messages = [system] if system else []
         self.plan_mode = False
         self.state.todos = []
+        # Fresh conversation — drop usage tracking and warning state.
+        self.last_total_tokens = None
+        self._warned_levels = set()
 
     def set_model(self, model: str) -> None:
         self.config.model = model
+        # New model probably has a different context window — re-look it up.
+        self._refresh_context_length()
+        self._warned_levels = set()
 
     def set_cwd(self, cwd: Path) -> None:
         self.state.cwd = cwd
@@ -171,7 +208,12 @@ class Agent:
             # the user will retry, and we'll verify fresh on the next turn.
             if final_text.startswith(("[error]", "[stopped:")):
                 return final_text
-            return self._verify_and_fix(final_text)
+            result = self._verify_and_fix(final_text)
+            # If usage crossed the auto-compact threshold, run compaction
+            # before returning so the user sees what happened in-line and the
+            # next turn starts with the freed context.
+            self._maybe_auto_compact()
+            return result
         except KeyboardInterrupt:
             # Hard reset: drop the user message, any partial assistant turn, and
             # any partial tool responses added during this turn.
@@ -348,6 +390,139 @@ class Agent:
             self._emit("verify_pass", {"files": touched_str})
         return final_text
 
+    # ---------- compaction ----------
+
+    def compact(self, reason: str = "manual") -> dict[str, Any] | None:
+        """Replace older turns with a model-generated summary. Keeps the system
+        prompt and the most recent complete turns intact. Returns a result dict
+        with stats for the UI, or None if there isn't enough history to make
+        compaction worthwhile (or the summary call fails)."""
+        split = self._find_compaction_split(keep_recent_turns=2)
+        if split is None:
+            self._emit("compact_skipped", {"reason": "not enough complete turns to compact"})
+            return None
+
+        to_compact = self.messages[1:split]
+        kept_tail = self.messages[split:]
+        old_count = len(self.messages)
+
+        self._emit("compact_start", {
+            "reason": reason,
+            "compacting_messages": len(to_compact),
+            "keeping_messages": len(kept_tail) + 1,  # +1 for the system prompt
+        })
+
+        # Ask the model to summarize. tools=None / stream=False to keep it
+        # simple — no tool calls to dispatch on the summary turn itself.
+        formatted = self._format_messages_for_summary(to_compact)
+        summary_messages: list[dict[str, Any]] = [
+            {"role": "system", "content": COMPACTION_SUMMARY_PROMPT},
+            {"role": "user", "content": f"Conversation to summarize:\n\n{formatted}"},
+        ]
+        try:
+            resp = self.client.chat(
+                model=self.config.model,
+                messages=summary_messages,
+                tools=None,
+                temperature=self.config.temperature,
+                stream=False,
+            )
+        except Exception as e:
+            self._emit("compact_failed", {"error": str(e)})
+            return None
+
+        if not resp.choices:
+            self._emit("compact_failed", {"error": "no choices in summary response"})
+            return None
+        summary = (resp.choices[0].message.content or "").strip()
+        if not summary:
+            self._emit("compact_failed", {"error": "empty summary"})
+            return None
+
+        # Rewrite history: system + summary + kept tail.
+        system = self.messages[0]
+        summary_msg = {
+            "role": "system",
+            "content": (
+                f"[compaction] Summary of {len(to_compact)} earlier message(s), "
+                "replacing them to free context window:\n\n" + summary
+            ),
+        }
+        self.messages = [system, summary_msg] + kept_tail
+
+        # Conversation shape changed — token estimates are stale. The next
+        # response's usage report will re-establish the count.
+        self.last_total_tokens = None
+        self._warned_levels = set()
+
+        result = {
+            "reason": reason,
+            "messages_before": old_count,
+            "messages_after": len(self.messages),
+            "summary_chars": len(summary),
+        }
+        self._emit("compact_done", result)
+        return result
+
+    def _find_compaction_split(self, keep_recent_turns: int = 2) -> int | None:
+        """Return the index AT which kept messages start: messages[1:split] gets
+        summarized; messages[0] (system) and messages[split:] stay verbatim.
+
+        The split lands immediately after a 'final assistant' (one with no
+        tool_calls), so we never break a tool_call → tool_response chain.
+        Returns None if there aren't enough complete turns to compact more than
+        a few messages — not worth the round-trip below that."""
+        final_assistants: list[int] = []
+        for i, m in enumerate(self.messages):
+            if m.get("role") == "assistant" and not m.get("tool_calls"):
+                final_assistants.append(i)
+        if len(final_assistants) <= keep_recent_turns:
+            return None
+        cutoff_idx = final_assistants[-keep_recent_turns - 1]
+        split = cutoff_idx + 1
+        # If we'd be summarizing fewer than 4 messages there's nothing to gain.
+        if split - 1 < 4:
+            return None
+        return split
+
+    def _format_messages_for_summary(self, messages: list[dict[str, Any]]) -> str:
+        """Render an internal message list as compact text for the summary call.
+        Tool outputs are truncated since they're typically the verbose part and
+        we mostly care about WHAT was done, not the raw stdout."""
+        lines: list[str] = []
+        for m in messages:
+            role = m.get("role", "?")
+            content = m.get("content", "") or ""
+            if role == "tool":
+                content = content[:500] + (" …[truncated]" if len(content) > 500 else "")
+                tool_id = (m.get("tool_call_id") or "")[:8]
+                lines.append(f"[tool result {tool_id}] {content}")
+            elif role == "assistant":
+                tc = m.get("tool_calls") or []
+                if tc:
+                    names = ", ".join(c.get("function", {}).get("name", "?") for c in tc)
+                    lines.append(f"[assistant → tools: {names}] {content}")
+                else:
+                    lines.append(f"[assistant] {content}")
+            elif role == "user":
+                lines.append(f"[user] {content}")
+            elif role == "system":
+                lines.append(f"[system] {content}")
+        return "\n\n".join(lines)
+
+    def _maybe_auto_compact(self) -> None:
+        """Run compaction automatically if the latest usage report puts us at
+        or above the configured threshold. Disabled when threshold is 0 or we
+        lack the data to know (no context length or no usage reported)."""
+        if self.config.auto_compact_threshold <= 0:
+            return
+        if self.last_total_tokens is None or not self.context_length:
+            return
+        ratio = self.last_total_tokens / self.context_length
+        if ratio < self.config.auto_compact_threshold:
+            return
+        self.compact(reason="auto")
+
     # ---------- single model round-trip ----------
 
     def _one_round(self, iteration: int) -> tuple[str, list[dict[str, Any]]]:
@@ -365,6 +540,9 @@ class Agent:
             temperature=self.config.temperature,
             stream=False,
         )
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            self._record_usage(getattr(usage, "total_tokens", None))
         msg = resp.choices[0].message
         content = msg.content or ""
         tcs = []
@@ -374,6 +552,29 @@ class Agent:
         if content:
             self._emit("assistant_text", {"text": content})
         return content, tcs
+
+    def _record_usage(self, total_tokens: int | None) -> None:
+        """Capture the token-usage report from a model response. Updates the
+        agent's running count and emits a context_usage event so the UI can
+        update the status line and fire threshold warnings."""
+        if total_tokens is None or not isinstance(total_tokens, int):
+            return
+        self.last_total_tokens = total_tokens
+        ratio = (total_tokens / self.context_length) if self.context_length else None
+        self._emit("context_usage", {
+            "tokens": total_tokens,
+            "max": self.context_length,
+            "ratio": ratio,
+        })
+        # Fire one-time warnings at 80% / 90% / 95% so the user is never
+        # surprised by silent truncation. We only fire each level once per
+        # conversation (cleared on /clear, /compact, /model switch).
+        if ratio is None:
+            return
+        for level in (80, 90, 95):
+            if ratio * 100 >= level and level not in self._warned_levels:
+                self._warned_levels.add(level)
+                self._emit("context_warning", {"level": level, "ratio": ratio})
 
     def _stream_round(self, iteration: int) -> tuple[str, list[dict[str, Any]]]:
         self._emit("turn_start", {"iteration": iteration, "model": self.config.model})
@@ -392,6 +593,11 @@ class Agent:
         )
         try:
             for event in stream:
+                # The final chunk (when stream_options.include_usage is set)
+                # carries usage with empty choices. Capture and skip rendering.
+                usage = getattr(event, "usage", None)
+                if usage is not None:
+                    self._record_usage(getattr(usage, "total_tokens", None))
                 if not event.choices:
                     continue
                 delta = event.choices[0].delta

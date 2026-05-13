@@ -41,6 +41,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Raise this if you hit 'Model call failed: timed out' on long generations."
         ),
     )
+    p.add_argument(
+        "--auto-compact-threshold",
+        type=float,
+        default=0.8,
+        help=(
+            "Fraction of the model's context window (0.0-1.0) at which "
+            "older turns are auto-summarized to free space (default %(default)s). "
+            "Set to 0 to disable auto-compaction; /compact remains available."
+        ),
+    )
     p.add_argument("prompt", nargs="*", help="If provided, run a one-shot prompt and exit")
     return p.parse_args(argv)
 
@@ -88,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         cwd=cwd,
         max_tool_iters=args.max_iters,
         temperature=args.temperature,
+        auto_compact_threshold=max(0.0, min(1.0, args.auto_compact_threshold)),
     )
     agent = Agent(client=client, config=cfg)
 

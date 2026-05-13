@@ -73,6 +73,10 @@ aquila --temperature 0.4 --max-iters 40
 # long generations (default 1200s; transient timeout/connection errors are
 # already auto-retried once before the turn bails).
 aquila --request-timeout 1800
+
+# Adjust when older turns get auto-summarized to free context window.
+# Default 0.8 = compact at 80% full. Set to 0 to disable (/compact still works).
+aquila --auto-compact-threshold 0.9
 ```
 
 Environment overrides (so you don't have to pass flags every time):
@@ -100,6 +104,7 @@ Anything not starting with `/` is sent to the model.
 | `/processes`         | list background processes started by the agent              |
 | `/stop <pid>`        | terminate a background process by PID                       |
 | `/queue [prompt]`    | queue a follow-up prompt; no-arg shows the queue, `clear` empties it |
+| `/compact`           | summarize older turns into one system message to free context |
 | `/exit`, `/quit`     | leave (Ctrl+D also works)                                   |
 
 ### Interrupting a turn
@@ -116,6 +121,16 @@ Files written to disk and background processes spawned before the interrupt are 
 Type `/queue <prompt>` one or more times *before* sending your main prompt. The main prompt runs first; when it finishes normally, queued prompts fire in order. `/queue` with no argument lists what's queued; `/queue clear` empties it. The queue is cleared automatically if you Ctrl+C mid-turn — queued prompts were authored against context that just got rolled back, so re-running them blind would be wrong.
 
 True mid-turn queueing (typing while the model is streaming) is a known TODO — it needs an asyncio refactor of the REPL so prompt_toolkit's input and Rich's Live display can coexist.
+
+### Context window: tracking, warnings, and compaction
+
+The streaming status line shows `ctx: 12.3K/32K (38%)` based on the `usage.total_tokens` LM Studio reports in each response, against the loaded context length read from `/v1/models/<id>`. Colors shift to yellow at ≥80% and red at ≥90%. If the server doesn't expose context length, the line shows the absolute token count instead.
+
+Once per conversation, a `⚠ context X% full` line prints when you cross 80%, 90%, and 95% — won't repeat for the same threshold even if subsequent turns hover there. `/clear`, `/compact`, and `/model <id>` reset the warning state.
+
+**`/compact`** summarizes older turns into a single `[compaction]` system message. The split lands immediately after a "final assistant" (no pending tool_calls) so it never breaks a tool_call → tool_response chain. The last two complete turns are preserved verbatim; everything before that gets replaced with a model-written summary covering files touched, decisions made, background processes started, and anything unfinished. One model call (non-streaming, no tools) runs the summarization.
+
+**Auto-compaction** runs the same flow automatically after any turn that puts you at or above `--auto-compact-threshold` (default 0.8 — i.e. 80%). Set the flag to 0 to disable; `/compact` still works. The compaction event renders an inline cyan panel showing before/after message counts so you can see exactly what happened.
 
 ### Plan mode
 

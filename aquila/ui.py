@@ -25,9 +25,18 @@ SLASH_COMMANDS = [
     "/help", "/model", "/models", "/clear", "/cwd", "/history",
     "/plan", "/approve", "/exec", "/cancel",
     "/todos", "/processes", "/stop",
-    "/queue",
+    "/queue", "/compact",
     "/exit", "/quit",
 ]
+
+
+def _fmt_tokens(n: int) -> str:
+    """Compact token-count formatter: 850 -> '850', 12345 -> '12.3K', 1234567 -> '1.2M'."""
+    if n < 1000:
+        return str(n)
+    if n < 1_000_000:
+        return f"{n / 1000:.1f}K"
+    return f"{n / 1_000_000:.1f}M"
 
 
 EXT_TO_LANG = {
@@ -81,6 +90,10 @@ class EventRenderer:
         self._status_elapsed = 0.0
         self._status_tokens = 0
         self._todos: list[dict[str, Any]] = []
+        # Latest known context-window usage; carries across turns so the status
+        # line shows the running fill, not just this-turn numbers.
+        self._ctx_tokens: int | None = None
+        self._ctx_max: int | None = None
 
     # ---------- public dispatch ----------
 
@@ -97,7 +110,19 @@ class EventRenderer:
         t.append("◐ ", style="cyan")
         t.append(f"iter {self._status_iter}", style="dim")
         t.append(f"  ·  {self._status_elapsed:5.1f}s", style="dim")
-        t.append(f"  ·  {self._status_tokens} tok", style="dim")
+        t.append(f"  ·  stream {self._status_tokens} tok", style="dim")
+        if self._ctx_tokens is not None:
+            if self._ctx_max:
+                ratio = self._ctx_tokens / self._ctx_max
+                color = "red" if ratio >= 0.9 else "yellow" if ratio >= 0.8 else "dim"
+                t.append("  ·  ctx ", style="dim")
+                t.append(
+                    f"{_fmt_tokens(self._ctx_tokens)}/{_fmt_tokens(self._ctx_max)} ({ratio:.0%})",
+                    style=color,
+                )
+            else:
+                # Server didn't expose context_length — show absolute count only.
+                t.append(f"  ·  ctx {_fmt_tokens(self._ctx_tokens)}", style="dim")
         return t
 
     def _live_renderable(self) -> Group:
@@ -316,6 +341,57 @@ class EventRenderer:
     def _on_interrupted(self, data: dict[str, Any]) -> None:
         self.console.print(Text("  ✗ interrupted — rolled back this turn", style="yellow"))
 
+    # ---------- context tracking & compaction ----------
+
+    def _on_context_usage(self, data: dict[str, Any]) -> None:
+        tokens = data.get("tokens")
+        max_tokens = data.get("max")
+        if isinstance(tokens, int):
+            self._ctx_tokens = tokens
+        if isinstance(max_tokens, int):
+            self._ctx_max = max_tokens
+
+    def _on_context_warning(self, data: dict[str, Any]) -> None:
+        level = data.get("level", 80)
+        ratio = data.get("ratio", 0)
+        style = "bold red" if level >= 90 else "bold yellow"
+        self.console.print(Text(
+            f"  ⚠ context {ratio:.0%} full (over {level}%) — consider /compact or /clear",
+            style=style,
+        ))
+
+    def _on_compact_skipped(self, data: dict[str, Any]) -> None:
+        reason = data.get("reason", "")
+        self.console.print(Text(f"  · compaction skipped: {reason}", style="dim"))
+
+    def _on_compact_start(self, data: dict[str, Any]) -> None:
+        reason = data.get("reason", "manual")
+        n = data.get("compacting_messages", 0)
+        keep = data.get("keeping_messages", 0)
+        self.console.print(Text(
+            f"  · compacting {n} message(s), keeping {keep} ({reason})…",
+            style="dim cyan",
+        ))
+
+    def _on_compact_done(self, data: dict[str, Any]) -> None:
+        before = data.get("messages_before", "?")
+        after = data.get("messages_after", "?")
+        chars = data.get("summary_chars", "?")
+        reason = data.get("reason", "manual")
+        self.console.print(Panel(
+            Text.from_markup(
+                f"[bold]compaction complete[/] ({reason})\n"
+                f"history: {before} → {after} messages\n"
+                f"summary length: {chars} chars"
+            ),
+            border_style="cyan",
+            expand=False,
+        ))
+
+    def _on_compact_failed(self, data: dict[str, Any]) -> None:
+        err = data.get("error", "")
+        self.console.print(Text(f"  ✗ compaction failed: {err}", style="red"))
+
     def _on_error(self, data: dict[str, Any]) -> None:
         self.console.print(f"[bold red]error:[/] {data.get('message', '')}")
 
@@ -356,6 +432,7 @@ class REPL:
             ("/processes", "show background processes"),
             ("/stop <pid>", "stop a background process by PID"),
             ("/queue [prompt]", "queue a follow-up prompt to run after the next turn (no arg = show queue; 'clear' = empty it)"),
+            ("/compact", "summarize older turns into one system message to free context window"),
             ("/exit, /quit", "leave the app (Ctrl+D also works)"),
         ]
         for k, v in rows:
@@ -478,6 +555,13 @@ class REPL:
             return
         self.console.print(stop_process(pid, state=self.agent.state))
 
+    def _cmd_compact(self, arg: str) -> None:
+        result = self.agent.compact(reason="manual")
+        if result is None:
+            # The agent already emitted compact_skipped / compact_failed which
+            # the renderer prints; nothing more to add.
+            return
+
     def _cmd_queue(self, arg: str) -> None:
         arg = arg.strip()
         if not arg:
@@ -531,6 +615,8 @@ class REPL:
             self._cmd_stop(arg)
         elif cmd == "/queue":
             self._cmd_queue(arg)
+        elif cmd == "/compact":
+            self._cmd_compact(arg)
         else:
             self.console.print(f"[yellow]unknown command:[/] {cmd}  (try /help)")
         return True

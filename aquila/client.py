@@ -50,6 +50,8 @@ class LMStudioClient:
         self.api_key = api_key
         self.request_timeout = request_timeout
         self._sdk = OpenAI(base_url=self.base_url, api_key=self.api_key, timeout=request_timeout)
+        # Per-model context length, cached after first lookup.
+        self._ctx_cache: dict[str, int | None] = {}
 
     def list_models(self) -> list[ModelInfo]:
         try:
@@ -68,6 +70,36 @@ class LMStudioClient:
             return r.status_code < 500
         except Exception:
             return False
+
+    def get_model_context_length(self, model_id: str) -> int | None:
+        """Look up the loaded context length for a model via LM Studio's
+        /v1/models/{id} endpoint, which adds non-standard fields beyond the
+        OpenAI schema. Returns None if the server doesn't expose it (other
+        OpenAI-compatible servers usually don't). Result is cached per-model."""
+        if model_id in self._ctx_cache:
+            return self._ctx_cache[model_id]
+        try:
+            with httpx.Client(timeout=5) as c:
+                r = c.get(
+                    f"{self.base_url}/models/{model_id}",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+            if r.status_code >= 400:
+                self._ctx_cache[model_id] = None
+                return None
+            data = r.json()
+        except Exception:
+            self._ctx_cache[model_id] = None
+            return None
+        # LM Studio exposes loaded_context_length; fall back to a few other
+        # plausible names that other OpenAI-compatible servers might use.
+        for key in ("loaded_context_length", "max_context_length", "context_length", "n_ctx"):
+            v = data.get(key) if isinstance(data, dict) else None
+            if isinstance(v, int) and v > 0:
+                self._ctx_cache[model_id] = v
+                return v
+        self._ctx_cache[model_id] = None
+        return None
 
     def chat(
         self,
@@ -88,4 +120,9 @@ class LMStudioClient:
             kwargs["tool_choice"] = "auto"
         if stream:
             kwargs["stream"] = True
+            # Request a final usage chunk so we can track context fill across
+            # streaming calls. Modern OpenAI-compatible servers (LM Studio,
+            # vLLM, etc.) honor this; older / stricter ones may ignore it,
+            # in which case usage stays None and the context display reads "--".
+            kwargs["stream_options"] = {"include_usage": True}
         return self._sdk.chat.completions.create(**kwargs)
