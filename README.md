@@ -168,7 +168,7 @@ All relative paths resolve against the current `/cwd`.
 
 - `list_dir(path=".")` — non-recursive. Prints `DIR ` / `FILE` markers plus byte sizes.
 - `search_files(pattern, path=".")` — recursive glob (`**/*.py`-style). Capped at **500 matches**.
-- `grep(pattern, path=".")` — recursive Python regex over text files. Skips binary / non-UTF-8 files silently. Capped at **300 matching lines** and walks at most **5000 files**. Output format: `path:line: content`.
+- `grep(pattern, path=".")` — recursive regex search over text files. Uses **ripgrep** automatically if `rg` is on `PATH` (respects `.gitignore`, skips hidden files, much faster on large repos); otherwise falls back to a pure-Python walk that searches everything and is capped at **5000 files**. Either way the result is capped at **300 matching lines** and emitted as `path:line: content`. If ripgrep rejects a regex feature it doesn't support (e.g. lookaround), the Python fallback runs instead.
 
 **Shell tools**
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -124,10 +125,54 @@ def search_files(pattern: str, path: str = ".", *, state: AgentState) -> str:
 
 
 def grep(pattern: str, path: str = ".", *, state: AgentState) -> str:
-    import re
     p = _resolve(path, state.cwd)
     if not p.exists():
         return f"ERROR: {p} does not exist"
+    rg_result = _grep_ripgrep(pattern, p)
+    if rg_result is not None:
+        return rg_result
+    return _grep_python(pattern, p)
+
+
+def _grep_ripgrep(pattern: str, p: Path) -> str | None:
+    """Run ripgrep if it's on PATH. Returns None if rg is unavailable or rejects the pattern,
+    in which case the caller falls back to the Python implementation."""
+    rg = shutil.which("rg")
+    if rg is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [rg, "--no-heading", "--with-filename", "-n", "--color=never", pattern, str(p)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    # rg exit codes: 0 = matches, 1 = no matches, 2+ = error (often a regex feature
+    # like lookaround that Python supports but the Rust regex crate does not). Fall back
+    # on error so behavior stays a strict superset of the old Python-only implementation.
+    if proc.returncode >= 2:
+        return None
+    if proc.returncode == 1 or not proc.stdout:
+        return f"No matches for /{pattern}/"
+    import re
+    lines = proc.stdout.splitlines()
+    truncated = len(lines) > 300
+    if truncated:
+        lines = lines[:300]
+    # rg emits "path:line:content"; normalize to "path:line: content" to match the
+    # documented format. Non-greedy `.+?` correctly handles Windows paths like C:\foo.py:42:.
+    formatted = [re.sub(r"^(.+?:\d+:)", r"\1 ", line, count=1) for line in lines]
+    if truncated:
+        formatted.append("... [truncated to 300 matches]")
+    return "\n".join(formatted)
+
+
+def _grep_python(pattern: str, p: Path) -> str:
+    import re
     try:
         rx = re.compile(pattern)
     except re.error as e:
