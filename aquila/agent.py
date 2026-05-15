@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,7 +21,12 @@ from .tools import (
 
 
 MAX_VERIFICATION_CYCLES = 2
+MAX_EMPTY_RETRIES = 2
 MODEL_RETRY_DELAY_SECS = 2.0
+
+# Strips <think>…</think> blocks that reasoning models (e.g. Qwen3, DeepSeek-R1)
+# sometimes emit as plain content rather than in a separate field.
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
 try:
@@ -234,6 +240,7 @@ class Agent:
         """Drive the model<->tools loop until the model returns no tool calls or
         the iteration cap fires. Returns the final assistant text (which may be a
         sentinel like '[error] ...' or '[stopped: ...]' on failure)."""
+        empty_retries = 0
         for iteration in range(1, self.config.max_tool_iters + 1):
             content, tool_calls, err = self._one_round_with_retry(iteration)
             if err is not None:
@@ -257,8 +264,28 @@ class Agent:
             self.messages.append(assistant_msg)
 
             if not tool_calls:
+                # Reasoning models (Qwen3, DeepSeek-R1, etc.) sometimes return
+                # only internal thinking tokens that LM Studio strips before
+                # sending, leaving content empty. Nudge up to MAX_EMPTY_RETRIES
+                # times before giving up so the model still produces a reply.
+                visible = _THINK_RE.sub("", content).strip()
+                if not visible and empty_retries < MAX_EMPTY_RETRIES:
+                    empty_retries += 1
+                    self._emit("continuation_nudge", {
+                        "attempt": empty_retries,
+                        "max": MAX_EMPTY_RETRIES,
+                    })
+                    # Replace the empty assistant turn with a user nudge so the
+                    # next round has a valid conversation structure to respond to.
+                    self.messages.pop()
+                    self.messages.append({
+                        "role": "user",
+                        "content": "Continue and provide your complete response to my request.",
+                    })
+                    continue
                 return content or ""
 
+            empty_retries = 0
             for tc in tool_calls:
                 name = tc["name"]
                 raw_args = tc["arguments"] or "{}"

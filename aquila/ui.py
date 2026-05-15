@@ -17,7 +17,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
-from .agent import Agent
+from .agent import Agent, MAX_EMPTY_RETRIES
 from .client import LMStudioClient
 
 
@@ -94,6 +94,9 @@ class EventRenderer:
         # line shows the running fill, not just this-turn numbers.
         self._ctx_tokens: int | None = None
         self._ctx_max: int | None = None
+        # Set to True when we receive at least one stream_delta with text this
+        # turn, so _on_assistant_text can skip reprinting what's already shown.
+        self._streamed_text_this_turn: bool = False
 
     # ---------- public dispatch ----------
 
@@ -165,10 +168,14 @@ class EventRenderer:
         self._status_elapsed = 0.0
         self._status_tokens = 0
         self._stream_buf = []
+        self._streamed_text_this_turn = False
         self._ensure_live()
 
     def _on_stream_delta(self, data: dict[str, Any]) -> None:
-        self._stream_buf.append(data.get("text", ""))
+        text = data.get("text", "")
+        self._stream_buf.append(text)
+        if text:
+            self._streamed_text_this_turn = True
         self._status_elapsed = float(data.get("elapsed", self._status_elapsed))
         self._status_tokens = int(data.get("tokens", self._status_tokens))
         if self._live is not None:
@@ -186,9 +193,9 @@ class EventRenderer:
         self._end_live(keep_text=keep)
 
     def _on_assistant_text(self, data: dict[str, Any]) -> None:
-        # In streaming mode the text is already shown; only print here if we
-        # didn't stream (non-streaming fallback).
-        if self._live is not None:
+        # Streaming already rendered the text in the Live panel; only print
+        # here for the non-streaming fallback path.
+        if self._streamed_text_this_turn:
             return
         text = (data.get("text") or "").strip()
         if text:
@@ -321,6 +328,14 @@ class EventRenderer:
             title="[bold red]needs your attention — verification could not auto-fix[/]",
             border_style="red",
             expand=False,
+        ))
+
+    def _on_continuation_nudge(self, data: dict[str, Any]) -> None:
+        attempt = data.get("attempt", 1)
+        max_nudges = data.get("max", MAX_EMPTY_RETRIES)
+        self.console.print(Text(
+            f"  · empty response — nudging model to continue ({attempt}/{max_nudges})",
+            style="dim yellow",
         ))
 
     def _on_model_retry(self, data: dict[str, Any]) -> None:
