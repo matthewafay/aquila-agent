@@ -341,6 +341,16 @@ class EventRenderer:
     def _on_interrupted(self, data: dict[str, Any]) -> None:
         self.console.print(Text("  ✗ interrupted — rolled back this turn", style="yellow"))
 
+    def _on_images_attached(self, data: dict[str, Any]) -> None:
+        paths = data.get("paths") or []
+        if not paths:
+            return
+        names = ", ".join(Path(p).name for p in paths)
+        self.console.print(Text(
+            f"  🖼 attached {len(paths)} image{'s' if len(paths) != 1 else ''}: {names}",
+            style="cyan",
+        ))
+
     # ---------- context tracking & compaction ----------
 
     def _on_context_usage(self, data: dict[str, Any]) -> None:
@@ -497,8 +507,19 @@ class REPL:
         for m in self.agent.messages:
             role = m.get("role", "?")
             content = m.get("content", "") or ""
+            # Multimodal user turns are a list of content parts; render text
+            # parts inline and replace image_url parts with a short marker
+            # rather than dumping the raw base64 payload.
             if isinstance(content, list):
-                content = json.dumps(content)
+                flat: list[str] = []
+                for p in content:
+                    if not isinstance(p, dict):
+                        continue
+                    if p.get("type") == "text":
+                        flat.append(p.get("text", ""))
+                    elif p.get("type") == "image_url":
+                        flat.append("[image attached]")
+                content = " ".join(flat)
             self.console.print(Panel(content[:1000], title=role, border_style="dim"))
 
     def _cmd_plan(self, arg: str) -> None:

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .client import LMStudioClient
+from .images import build_user_message, find_images
 from .state import AgentState
 from .tools import (
     READONLY_TOOL_NAMES,
@@ -62,6 +63,9 @@ Task tracking (IMPORTANT):
 Editing files:
 - Prefer edit_file or multi_edit over write_file when modifying an existing file.
 - Use multi_edit when you need to make several changes to one file in a single round-trip.
+
+Vision:
+- The user may paste image file paths in their message; those images are auto-attached and visible to you when the loaded model supports vision. Analyze them when they're relevant to the request.
 
 Style:
 - Be concise. No filler. No emojis unless asked.
@@ -200,7 +204,12 @@ class Agent:
         # which is invalid against the chat-completions schema.
         snapshot_len = len(self.messages)
         self.state.touched_files.clear()
-        self.messages.append({"role": "user", "content": user_input})
+        attached = find_images(user_input, self.state.cwd)
+        if attached:
+            self._emit("images_attached", {
+                "paths": [str(p) for _, p in attached],
+            })
+        self.messages.append(build_user_message(user_input, attached))
 
         try:
             final_text = self._run_tool_loop()
@@ -493,6 +502,18 @@ class Agent:
         for m in messages:
             role = m.get("role", "?")
             content = m.get("content", "") or ""
+            # Multimodal user turns store content as a list of parts; flatten
+            # to text so the summarizer doesn't see raw base64.
+            if isinstance(content, list):
+                flat: list[str] = []
+                for p in content:
+                    if not isinstance(p, dict):
+                        continue
+                    if p.get("type") == "text":
+                        flat.append(p.get("text", ""))
+                    elif p.get("type") == "image_url":
+                        flat.append("[image]")
+                content = " ".join(flat)
             if role == "tool":
                 content = content[:500] + (" …[truncated]" if len(content) > 500 else "")
                 tool_id = (m.get("tool_call_id") or "")[:8]
